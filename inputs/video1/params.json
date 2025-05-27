@@ -1,0 +1,10 @@
+{
+  "RECT_W": 1400,
+  "RECT_H": 300,
+  "PEAK_THRESH": 1.0,
+  "MIN_KEY_SIZE": 38,
+  "MIN_KEY_SIZE_CORNER": 30,
+  "FIRST_KEY": 7,
+  "N_KEYS": 54,
+  "FRAC_THRESH": 0.04
+}
