@@ -42,6 +42,7 @@ model, or replace the simple debouncing logic with a recurrent network.
 """
 
 import cv2
+from mido import MetaMessage
 import numpy as np
 import mediapipe as mp
 import argparse
@@ -123,7 +124,7 @@ def load_or_compute_homography(folder, params):
         if abs(angle) < 20:
             horiz.append((x1, y1, x2, y2))
             cv2.line(img_lines, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        elif abs(90 + angle) < 10:
+        elif 90 - abs(angle) < 20:
             vert.append((x1, y1, x2, y2))
             cv2.line(img_lines, (x1, y1), (x2, y2), (0, 0, 255), 2)
     cv2.imwrite(get_output_path("lines.png"), img_lines)
@@ -242,10 +243,6 @@ def load_or_compute_homography(folder, params):
     return H, key_polys
 
 
-SKIN_LO = (0, 133, 77)  # YCrCb skin-range (light-independent)
-SKIN_HI = (255, 173, 127)
-
-DIFF_THRESH = 20  # Δ-intensity (0-255) to call a pixel “changed”
 FRAC_THRESH = 0.04  # ≥ 12 % of visible ROI changed  ⇒  key pressed
 BOTTOM_RATIO = 1  # only use bottom 30 % of the key   (fingers rarely hide it)
 
@@ -292,8 +289,6 @@ def is_key_toggled(
     key_poly,
     ref_img,
     curr_img,
-    skin_range=(SKIN_LO, SKIN_HI),
-    diff_thresh=DIFF_THRESH,
     frac_thresh=FRAC_THRESH,
     bottom_ratio=BOTTOM_RATIO,
     args=None,
@@ -471,16 +466,10 @@ def get_keys_being_touched(folder, img, key_polys, args=None):
     return touched_keys, annotated_image
 
 
-def process_video(args):
-    with open(os.path.join("inputs", args.input, "params.json"), "r") as f:
-        params = json.load(f)
-
+def process_video(args, cap, params):
     H, key_polys = load_or_compute_homography(args.input, params)
 
-    cap = cv2.VideoCapture(os.path.join("inputs", args.input, "video.mp4"))
-    if not cap.isOpened():
-        raise IOError(f"Cannot open video file: {args.input}")
-    fps = args.fps if args.fps else cap.get(cv2.CAP_PROP_FPS)
+    fps = cap.get(cv2.CAP_PROP_FPS)
     if fps <= 0:
         raise ValueError("Invalid FPS value. Please check the video file.")
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -495,7 +484,7 @@ def process_video(args):
         os.makedirs(output_folder)
 
     # Get first frame
-    start_frame = 120
+    start_frame = params["FIRST_FRAME"]
     frame = start_frame
     cont = 0
 
@@ -534,26 +523,26 @@ def process_video(args):
         if args.show:
             print("Pressed Keys:", pressed_keys)
         final_results[frame] = pressed_keys
-        frame += frame_step
+        frame += params["FRAME_STEP"]
         cont += 1
-        if cont >= 120 or frame > 6 * 60:
+        if cont >= 250:  # or frame > 6 * 60:
             break
-        print(f"Processed frame {frame} / {start_frame + 120 * frame_step}")
+        print(f"Processed frame {frame} / {start_frame + 250 * params['FRAME_STEP']}")
 
     if args.show:
         for frame, keys in final_results.items():
             print(f"Frame {frame}: Pressed Keys: {keys}")
 
-    return final_results, fps
-
-
-frame_step = 10
+    return final_results
 
 
 def soften_results(results):
     for frame, keys in results.items():
-        results[frame] = set(keys)  # Remove duplicates
+        results[frame] = list(set(keys))  # Remove duplicates
 
+    return results
+
+    frame_step = params["FRAME_STEP"]
     # Softening: ensure each key is pressed for at least min_frames
     for frame, keys in results.items():
         new_keys = keys.copy()
@@ -572,7 +561,7 @@ def soften_results(results):
             for f in frames_to_look:
                 if f in results and key in results[f]:
                     count += 1
-            if count < 2:
+            if count < 0:
                 # If no other frame has this key, remove it
                 new_keys.remove(key)
         results[frame] = new_keys
@@ -583,7 +572,7 @@ def soften_results(results):
         int_frame = int(frame)
         to_merge = [
             str(k)
-            for k in range(int_frame - 2 * frame_step, int_frame + 3 * frame_step)
+            for k in range(int_frame - 0 * frame_step, int_frame + 1 * frame_step)
         ]
         merged_keys = set()
         for f in to_merge:
@@ -595,12 +584,20 @@ def soften_results(results):
 
 
 # Create MIDI file from results and fps
-def create_midi_from_results(results, fps, output_file):
+def create_midi_from_results(results, fps, output_file, params):
     from mido import MidiFile, MidiTrack, Message
 
     mid = MidiFile()
     track = MidiTrack()
     mid.tracks.append(track)
+
+    track.append(MetaMessage("key_signature", key="C", time=0))
+    track.append(MetaMessage("time_signature", numerator=4, denominator=4, time=0))
+    track.append(
+        MetaMessage(
+            "set_tempo", tempo=int(100_000_000 * params["TEMPO_ADJUST"] / fps), time=0
+        )
+    )
 
     active_keys = set()
     frames = []
@@ -609,23 +606,40 @@ def create_midi_from_results(results, fps, output_file):
     frames.sort(key=lambda x: x[0])  # Sort by frame number
 
     start_frame = frames[0][0] if frames else 0
+
+    last_frame_time = start_frame
+
     for frame, keys in frames:
         frame = int(frame)  # Ensure frame is an integer
         time = int((frame / fps))  # Convert to milliseconds
 
         new_active_keys = set()  # Copy current active keys
+
+        frame_time = frame - last_frame_time
+
+        KEY_OFFSET = params["FIRST_KEY"] + 12 * params["OCTAVE_OFFSET"]
+
         for key in set(keys):
             if key not in active_keys:
                 print(f"Key {key} pressed at frame {frame}, time {time} s")
                 note_on = Message(
-                    "note_on", note=key + 21, velocity=64, time=time * 1000
+                    "note_on",
+                    note=key + KEY_OFFSET,
+                    velocity=64,
+                    time=frame_time,
                 )
+                frame_time = 0
+                last_frame_time = frame
                 track.append(note_on)
                 active_keys.add(key)
             new_active_keys.add(key)
         for key in active_keys - new_active_keys:
-            print(f"Key {key} released at frame {frame}, time {time} s")
-            note_off = Message("note_off", note=key + 21, velocity=64, time=time * 1000)
+            # print(f"Key {key} released at frame {frame}, time {time} s")
+            note_off = Message(
+                "note_off", note=key + KEY_OFFSET, velocity=64, time=frame_time
+            )
+            frame_time = 0
+            last_frame_time = frame
             track.append(note_off)
             active_keys.remove(key)
 
@@ -641,14 +655,7 @@ def parse_args():
         description="Visual piano transcription (white keys only)"
     )
     ap.add_argument("-i", "--input", required=True, help="Path to input video")
-    ap.add_argument(
-        "-o", "--output", default="events.csv", help="Output CSV for Note events"
-    )
     ap.add_argument("--calibrate", action="store_true", help="Force recalibration")
-    ap.add_argument("--fps", type=float, help="Override detected FPS")
-    ap.add_argument(
-        "--min_frames", type=int, default=2, help="Frames to confirm a key press"
-    )
     ap.add_argument("--show", action="store_true", help="Show debug windows")
     return ap.parse_args()
 
@@ -658,21 +665,27 @@ if __name__ == "__main__":
 
     output_file_path = os.path.join("outputs", args.input, "output.json")
 
+    with open(os.path.join("inputs", args.input, "params.json"), "r") as f:
+        params = json.load(f)
+
+    cap = cv2.VideoCapture(os.path.join("inputs", args.input, "video.mp4"))
+    if not cap.isOpened():
+        raise IOError(f"Cannot open video file: {args.input}")
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    print(f"Video FPS: {fps}")
+
     if not os.path.exists(output_file_path) or args.calibrate:
-        results, fps = process_video(args)
+        results = process_video(args, cap, params)
         with open(output_file_path, "w") as f:
             json.dump(results, f, indent=2)
     else:
         with open(output_file_path, "r") as f:
             results = json.load(f)
-        fps = args.fps if args.fps else 30
 
     softened = soften_results(results)
     with open(os.path.join("outputs", args.input, "softened.json"), "w") as f:
         json.dump(softened, f, indent=2)
 
     create_midi_from_results(
-        softened,
-        fps,
-        os.path.join("outputs", args.input, "output.mid"),
+        softened, fps, os.path.join("outputs", args.input, "output.mid"), params
     )
