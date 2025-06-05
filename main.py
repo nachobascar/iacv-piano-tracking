@@ -48,11 +48,6 @@ import argparse
 import json
 import os
 import itertools
-import pandas as pd
-from collections import defaultdict
-from datetime import timedelta
-
-from sympy import poly
 
 # ------------- Constants --------------------------------------------------- #
 # Map 88‑key index (0 = A0) to note names. Sharps for black keys.
@@ -401,7 +396,7 @@ def get_keys_being_touched(folder, img, key_polys, args=None):
     with mp_hands.Hands(
         static_image_mode=True,
         max_num_hands=3,
-        min_detection_confidence=0.0,
+        min_detection_confidence=0.4,
     ) as hands:
         custom_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = hands.process(custom_img)
@@ -444,7 +439,7 @@ def get_keys_being_touched(folder, img, key_polys, args=None):
     if args.show:
         for x, y, z in fingertips_rect:
             cv2.circle(annotated_image, (x, y), 5, (0, 255, 255), -1)
-    cv2.imwrite(get_output_path("fingertips.png"), annotated_image)
+        cv2.imwrite(get_output_path("fingertips.png"), annotated_image)
     # Check which keys are touched
     touched_keys = []
     for i, poly in enumerate(key_polys):
@@ -500,7 +495,7 @@ def process_video(args):
         os.makedirs(output_folder)
 
     # Get first frame
-    start_frame = 450
+    start_frame = 120
     frame = start_frame
     cont = 0
 
@@ -539,12 +534,11 @@ def process_video(args):
         if args.show:
             print("Pressed Keys:", pressed_keys)
         final_results[frame] = pressed_keys
-        frame_step = 1
         frame += frame_step
         cont += 1
-        if cont >= 500:
+        if cont >= 120 or frame > 6 * 60:
             break
-        print(f"Processed frame {frame} / {start_frame + 500 * frame_step}")
+        print(f"Processed frame {frame} / {start_frame + 120 * frame_step}")
 
     if args.show:
         for frame, keys in final_results.items():
@@ -553,25 +547,32 @@ def process_video(args):
     return final_results, fps
 
 
+frame_step = 10
+
+
 def soften_results(results):
-    for key, keys in results.items():
-        results[key] = set(keys)  # Remove duplicates
+    for frame, keys in results.items():
+        results[frame] = set(keys)  # Remove duplicates
 
     # Softening: ensure each key is pressed for at least min_frames
     for frame, keys in results.items():
         new_keys = keys.copy()
         for key in keys:
             int_frame = int(frame)
-            to_look = [
-                str(k)
-                for k in [int_frame - 2, int_frame - 1, int_frame + 1, int_frame + 2]
+            frames_to_look = [
+                str(f)
+                for f in [
+                    int_frame - 2 * frame_step,
+                    int_frame - frame_step,
+                    int_frame + frame_step,
+                    int_frame + 2 * frame_step,
+                ]
             ]
-            has_other = False
-            for f in to_look:
+            count = 0
+            for f in frames_to_look:
                 if f in results and key in results[f]:
-                    has_other = True
-                    break
-            if not has_other:
+                    count += 1
+            if count < 2:
                 # If no other frame has this key, remove it
                 new_keys.remove(key)
         results[frame] = new_keys
@@ -580,7 +581,10 @@ def soften_results(results):
     merged_results = {}
     for frame, keys in results.items():
         int_frame = int(frame)
-        to_merge = [str(k) for k in range(int_frame - 2, int_frame + 3)]
+        to_merge = [
+            str(k)
+            for k in range(int_frame - 2 * frame_step, int_frame + 3 * frame_step)
+        ]
         merged_keys = set()
         for f in to_merge:
             if f in results:
@@ -606,20 +610,22 @@ def create_midi_from_results(results, fps, output_file):
 
     start_frame = frames[0][0] if frames else 0
     for frame, keys in frames:
-        frame = int(frame) - start_frame  # Ensure frame is an integer
+        frame = int(frame)  # Ensure frame is an integer
         time = int((frame / fps))  # Convert to milliseconds
 
         new_active_keys = set()  # Copy current active keys
         for key in set(keys):
             if key not in active_keys:
-                print(f"Key {key} pressed at frame {frame}, time {time} ms")
-                note_on = Message("note_on", note=key + 21, velocity=64, time=time)
+                print(f"Key {key} pressed at frame {frame}, time {time} s")
+                note_on = Message(
+                    "note_on", note=key + 21, velocity=64, time=time * 1000
+                )
                 track.append(note_on)
                 active_keys.add(key)
             new_active_keys.add(key)
         for key in active_keys - new_active_keys:
-            print(f"Key {key} released at frame {frame}, time {time} ms")
-            note_off = Message("note_off", note=key + 21, velocity=64, time=time)
+            print(f"Key {key} released at frame {frame}, time {time} s")
+            note_off = Message("note_off", note=key + 21, velocity=64, time=time * 1000)
             track.append(note_off)
             active_keys.remove(key)
 
