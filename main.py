@@ -48,52 +48,12 @@ import mediapipe as mp
 import argparse
 import json
 import os
-import itertools
 
-# ------------- Constants --------------------------------------------------- #
-# Map 88‑key index (0 = A0) to note names. Sharps for black keys.
-NOTE_NAMES = (
-    [
-        "A0",
-        "A#0",
-        "B0",
-    ]
-    + list(
-        itertools.chain.from_iterable(
-            [
-                f"{n}{octave}"
-                for n in [
-                    "C",
-                    "C#",
-                    "D",
-                    "D#",
-                    "E",
-                    "F",
-                    "F#",
-                    "G",
-                    "G#",
-                    "A",
-                    "A#",
-                    "B",
-                ]
-            ]
-            for octave in range(1, 8)
-        )
-    )
-    + ["C8"]
-)
 
-WHITE_KEY_ORDER = [0, 2, 4, 5, 7, 9, 11]  # Semitone offsets for C major scale
-BLACK_KEY_ORDER = [1, 3, 6, 8, 10]  # Semitone offsets for black keys
-
-# Thresholds (tune per dataset)
 DEPTH_THRESHOLD = 0.02  # In MediaPipe z‑units (~relative to hand size)
-VELOCITY_THRESHOLD = 1.5  # px / frame (y direction in rectified view)
 
 # MediaPipe setup
 mp_hands = mp.solutions.hands
-
-# ------------------- Helper Functions ------------------------------------- #
 
 
 def load_or_compute_homography(folder, params):
@@ -109,22 +69,26 @@ def load_or_compute_homography(folder, params):
     # --- Manual calibration: user clicks four corners in GUI --- #
     img = cv2.imread(os.path.join("inputs", folder, "reference.png"))
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 50, 120)
+    edges = cv2.Canny(gray, 50, 80)
 
     cv2.imwrite(get_output_path("edges.png"), edges)
 
     # 2.  Hough-detect the four outer keyboard edges
-    lines = cv2.HoughLinesP(
-        edges, 1, np.pi / 180, 120, minLineLength=100, maxLineGap=20
-    )
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 120, minLineLength=80, maxLineGap=20)
     horiz, vert = [], []
     img_lines = img.copy()
+
+    padding = 7
+
     for x1, y1, x2, y2 in lines[:, 0]:
         angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
-        if abs(angle) < 20:
+        if abs(angle) < 20 and y1 > padding and y2 > padding:
+            if "MIN_REFERENCE_Y" in params:
+                if y1 < params["MIN_REFERENCE_Y"] or y2 < params["MIN_REFERENCE_Y"]:
+                    continue
             horiz.append((x1, y1, x2, y2))
             cv2.line(img_lines, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        elif 90 - abs(angle) < 20:
+        elif 90 - abs(angle) < 20 and x1 > padding and x2 > padding:
             vert.append((x1, y1, x2, y2))
             cv2.line(img_lines, (x1, y1), (x2, y2), (0, 0, 255), 2)
     cv2.imwrite(get_output_path("lines.png"), img_lines)
@@ -243,11 +207,10 @@ def load_or_compute_homography(folder, params):
     return H, key_polys
 
 
-FRAC_THRESH = 0.04  # ≥ 12 % of visible ROI changed  ⇒  key pressed
-BOTTOM_RATIO = 1  # only use bottom 30 % of the key   (fingers rarely hide it)
+BOTTOM_RATIO = 1
 
 
-def build_skin_mask(bgr):
+def build_skin_mask(bgr, params):
     """
     Robust hand/skin mask that survives warm/yellow lighting.
 
@@ -266,13 +229,15 @@ def build_skin_mask(bgr):
     H, S, V = cv2.split(hsv)
 
     # --- 1. classic YCrCb window (very permissive) --------------------------
-    mask_ycc = (Cr > 133) & (Cr < 173) & (Cb > 77) & (Cb < 127)
+    mask_ycc = (Cr > 133) & (Cr < 185) & (Cb > 77) & (Cb < 127)
 
     # --- 2. add saturation test  (keys are almost grey) ---------------------
-    mask_sat = S > 120  # tune 35–50; keep only reasonably coloured pixels
+    mask_sat = S > params.get("SKIN_SATURATION_THRESH", 120)
 
     # --- 3. discard very bright pixels (white keys) -------------------------
-    mask_not_white = Y < 200  # keys typically Y≈245–255 after rectification
+    mask_not_white = Y < params.get(
+        "SKIN_WHITE_THRESH", 200
+    )  # keys typically Y≈245–255 after rectification
 
     mask = mask_ycc & mask_sat & mask_not_white
     mask = mask.astype(np.uint8) * 255
@@ -289,7 +254,8 @@ def is_key_toggled(
     key_poly,
     ref_img,
     curr_img,
-    frac_thresh=FRAC_THRESH,
+    params,
+    frac_thresh,
     bottom_ratio=BOTTOM_RATIO,
     args=None,
 ):
@@ -322,7 +288,7 @@ def is_key_toggled(
     # mask_skin = cv2.inRange(ycc, *skin_range)
     # kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     # mask_skin = cv2.morphologyEx(mask_skin, cv2.MORPH_CLOSE, kernel, iterations=2)
-    mask_skin = build_skin_mask(curr_img)
+    mask_skin = build_skin_mask(curr_img, params)
 
     # Show the image with the mask colored in red
     if args.show:
@@ -500,9 +466,6 @@ def process_video(args, cap, params):
         possible_keys, img_fingers = get_keys_being_touched(
             args.input, first_frame, key_polys, args=args
         )
-        if args.show:
-            cv2.imwrite(os.path.join(output_folder, f"frame_{frame}.png"), img_fingers)
-            print("Touched Keys:", possible_keys)
 
         pressed_keys = []
         for i in possible_keys:
@@ -512,22 +475,38 @@ def process_video(args, cap, params):
                 poly,
                 ref_img,
                 first_frame,
+                params,
                 frac_thresh=params["FRAC_THRESH"],
                 args=args,
             )
 
             if score > params["FRAC_THRESH"]:
+                # Put green border around the key
+                cv2.polylines(
+                    img_fingers,
+                    [poly.astype(np.int32)],
+                    isClosed=True,
+                    color=(0, 255, 0),
+                    thickness=2,
+                )
                 pressed_keys.append(i)
                 if args.show:
                     print(f"Frame {frame}: Key {i} is toggled with score {score:.2f}")
         if args.show:
+            cv2.imwrite(os.path.join(output_folder, f"frame_{frame}.png"), img_fingers)
+            print("Touched Keys:", possible_keys)
             print("Pressed Keys:", pressed_keys)
         final_results[frame] = pressed_keys
         frame += params["FRAME_STEP"]
         cont += 1
-        if cont >= 250:  # or frame > 6 * 60:
+
+        MAX_ITERS = 250
+
+        if cont >= MAX_ITERS:  # or frame > 6 * 60:
             break
-        print(f"Processed frame {frame} / {start_frame + 250 * params['FRAME_STEP']}")
+        print(
+            f"Processed frame {frame} / {start_frame + MAX_ITERS * params['FRAME_STEP']}"
+        )
 
     if args.show:
         for frame, keys in final_results.items():
@@ -595,7 +574,9 @@ def create_midi_from_results(results, fps, output_file, params):
     track.append(MetaMessage("time_signature", numerator=4, denominator=4, time=0))
     track.append(
         MetaMessage(
-            "set_tempo", tempo=int(100_000_000 * params["TEMPO_ADJUST"] / fps), time=0
+            "set_tempo",
+            tempo=int(100_000_000 / 20 * params["TEMPO_ADJUST"] / fps),
+            time=0,
         )
     )
 
@@ -626,7 +607,7 @@ def create_midi_from_results(results, fps, output_file, params):
                     "note_on",
                     note=key + KEY_OFFSET,
                     velocity=64,
-                    time=frame_time,
+                    time=frame_time * 20,
                 )
                 frame_time = 0
                 last_frame_time = frame
@@ -636,7 +617,7 @@ def create_midi_from_results(results, fps, output_file, params):
         for key in active_keys - new_active_keys:
             # print(f"Key {key} released at frame {frame}, time {time} s")
             note_off = Message(
-                "note_off", note=key + KEY_OFFSET, velocity=64, time=frame_time
+                "note_off", note=key + KEY_OFFSET, velocity=64, time=frame_time * 20
             )
             frame_time = 0
             last_frame_time = frame

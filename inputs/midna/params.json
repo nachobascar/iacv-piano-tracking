@@ -1,0 +1,14 @@
+{
+  "RECT_W": 600,
+  "RECT_H": 100,
+  "PEAK_THRESH": 0.2,
+  "MIN_KEY_SIZE": 10,
+  "MIN_KEY_SIZE_CORNER": 8,
+  "FIRST_KEY": 0,
+  "OCTAVE_OFFSET": 1,
+  "N_KEYS": 72,
+  "FRAC_THRESH": 0.15,
+  "TEMPO_ADJUST": 4,
+  "FRAME_STEP": 3,
+  "FIRST_FRAME": 120
+}
