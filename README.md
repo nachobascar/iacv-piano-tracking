@@ -23,23 +23,25 @@ The full classical (non‑DL) pipeline, including many pitfalls and future work,
 
 ```text
 project_root/
-├── main.py                 # Entry‑point script (run everything from here)
-├── project_report.pdf      # Written report (methodology & discussion)
-├── requirements.txt        # Precise Python dependencies
+├── main.py                   # Entry‑point script (run everything from here)
+├── project_report.pdf        # Written report (methodology & discussion)
+├── presentation.pdf          # Presentation slides
+├── presentation.pptx         # Presentation source (editable): Includes demo audios of the output
 ├── inputs/
-│   └── <video_name>/       # One sub‑folder per test video
-│       ├── params.json     # Fine‑tuning thresholds for this take
-│       ├── reference.png   # Clean keyboard image (no hands)
-│       └── video.mp4       # The raw performance
+│   └── <video_name>/         # One sub‑folder per test video
+│       ├── params.json       # Fine‑tuning thresholds for this take. Includes the YouTube source link.
+│       ├── reference.png     # Clean keyboard image (no hands)
+│       └── video.mp4         # The raw performance
 └── outputs/
-    └── <video_name>/       # Auto‑generated results live here
-        ├── output.json     # Raw per‑frame key states
-        ├── softened.json   # Temporal smoothing of `output.json`
-        ├── output.mid      # The extracted performance
-        ├── frames/         # Debug visuals (hands + key overlay)
-        ├── homography/     # Debug: rectification steps
-        ├── keys_touched/   # Debug: finger‑key proximity
-        └── is_toggled/     # Debug: final "pressed?" decision
+    └── <video_name>/         # Auto‑generated results live here
+        ├── [video_name].mp3  # Audio of the MIDI output (generated manually)
+        ├── output.json       # Raw per‑frame key states
+        ├── softened.json     # Temporal smoothing of `output.json`
+        ├── output.mid        # The extracted performance
+        ├── frames/           # Debug visuals (hands + key overlay)
+        ├── homography/       # Debug: rectification steps
+        ├── keys_touched/     # Debug: finger‑key proximity
+        └── is_toggled/       # Debug: final "pressed?" decision
 ```
 
 *Tip:* Supply your own `inputs/<video_name>` folder with the three required files to test a new piece.
